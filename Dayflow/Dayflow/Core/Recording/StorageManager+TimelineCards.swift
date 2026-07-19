@@ -402,7 +402,6 @@ extension StorageManager {
                 ORDER BY start ASC
             """, arguments: [batchId]
         ).map { row in
-<<<<<<< HEAD
           let meta = Self.parseMetadata(row["metadata"], using: decoder)
           var distractions: [Distraction]? = meta.distractions
           var appSites: AppSites? = meta.appSites
