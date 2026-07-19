@@ -183,11 +183,21 @@ final class LLMService: LLMServicing {
     return OllamaProvider(openAICompatible: runtimeConfiguration)
   }
 
+  private func makeMiniMaxProvider() -> MiniMaxProvider? {
+    guard let key = KeychainManager.shared.retrieve(for: MiniMaxProvider.keychainKey),
+      !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else {
+      print("❌ [LLMService] MiniMax provider unavailable: missing API key")
+      return nil
+    }
+    return MiniMaxProvider()
+  }
+
   private func providerLabel(for providerID: LLMProviderID) -> String {
     providerID.providerLabel
   }
 
-  /// Returns the model id the provider should be stamped with on
+/// Returns the model id the provider should be stamped with on
   /// generated cards. Mirrors how `providerLabel` is sourced from the
   /// `LLMProviderID`, but goes one level deeper to read the actual model
   /// the user has configured (Gemini primary preference, Ollama model id
@@ -223,6 +233,8 @@ final class LLMService: LLMServicing {
       // Settings → Providers tab writes this). The CLI accepts
       // these aliases natively — `sonnet` → latest Sonnet release.
       return ClaudeModelPreference.load().primary.rawValue
+    case .minimax:
+      return MiniMaxModelPreference.load().modelId
     case .dayflow:
       return nil
     }
@@ -329,6 +341,20 @@ final class LLMService: LLMServicing {
         actions: BatchProviderActions(
           transcribeScreenshots: provider.transcribeScreenshots,
           generateActivityCards: provider.generateActivityCards
+        ), fallbackState: nil
+      )
+    case .minimax:
+      guard let provider = makeMiniMaxProvider() else { throw noProviderError() }
+      return (
+        actions: BatchProviderActions(
+          transcribeScreenshots: { [provider] screenshots, batchStartTime, batchId in
+            try await provider.transcribeScreenshots(
+              screenshots, batchStartTime: batchStartTime, batchId: batchId)
+          },
+          generateActivityCards: { [provider] observations, context, batchId in
+            try await provider.generateActivityCards(
+              observations: observations, context: context, batchId: batchId)
+          }
         ), fallbackState: nil
       )
     }
@@ -624,6 +650,14 @@ final class LLMService: LLMServicing {
           try await provider.generateText(prompt: prompt)
         },
         generateTextStreaming: provider.generateTextStreaming
+      )
+    case .minimax:
+      guard let provider = makeMiniMaxProvider() else { throw noProviderError() }
+      return TextProviderActions(
+        generateText: { prompt in
+          try await provider.generateText(prompt: prompt)
+        },
+        generateTextStreaming: nil
       )
     }
   }
@@ -998,7 +1032,7 @@ final class LLMService: LLMServicing {
                 distractions: card.distractions,
                 appSites: card.appSites,
                 isBackupGenerated: isBackupGenerated ? true : nil,
-                providerId: activeProviderId,
+providerId: activeProviderId,
                 modelId: activeModelId
               )
             },

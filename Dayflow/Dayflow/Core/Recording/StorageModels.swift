@@ -115,7 +115,7 @@ struct TimelineCard: Codable, Sendable, Identifiable {
   let otherVideoSummaryURLs: [String]?  // For merged cards, subsequent video URLs
   let appSites: AppSites?
   let isBackupGenerated: Bool?
-  /// Stable provider id of the model that produced this card
+/// Stable provider id of the model that produced this card
   /// (e.g. "gemini", "ollama", "chatgpt", "claude", "dayflow",
   /// "openai_compatible"). Older saved cards don't carry this — leave
   /// `nil` so the UI can hide the badge instead of showing a stale value.
@@ -247,7 +247,7 @@ struct TimelineCardShell: Sendable {
   let appSites: AppSites?
   let isBackupGenerated: Bool?
   let idleMetadata: IdleCardMetadata?
-  /// Stable provider id of the model that produced this card
+/// Stable provider id of the model that produced this card
   /// (e.g. "gemini", "ollama", "chatgpt", "claude", "dayflow").
   /// Optional because older shells (e.g. error / idle paths) don't know
   /// who produced them; the UI simply omits the badge when nil.

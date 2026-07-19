@@ -157,14 +157,16 @@ extension StorageManager {
         sql: """
               INSERT INTO timeline_cards(
                   batch_id, start, end, start_ts, end_ts, day, title,
-                  summary, category, subcategory, detailed_summary, metadata
+                  summary, category, subcategory, detailed_summary, metadata,
+                  provider_id, model_id
                   -- video_summary_url is omitted here
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           """,
         arguments: [
           batchId, card.startTimestamp, card.endTimestamp, startTs, endTs, dayString, card.title,
           card.summary, card.category, card.subcategory, card.detailedSummary, metadataString,
+          card.providerId, card.modelId,
         ])
       lastId = db.lastInsertedRowID
     }
@@ -327,9 +329,10 @@ extension StorageManager {
         sql: """
               INSERT INTO timeline_cards(
                   batch_id, start, end, start_ts, end_ts, day, title,
-                  summary, category, subcategory, detailed_summary, metadata
+                  summary, category, subcategory, detailed_summary, metadata,
+                  provider_id, model_id
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           """,
         arguments: [
           nil,  // batch_id is NULL for onboarding card
@@ -344,6 +347,8 @@ extension StorageManager {
           "Setup",
           "",  // detailed_summary - empty string (not NULL, as GRDB decode expects non-optional)
           metadataString,
+          nil,  // provider_id
+          nil,  // model_id
         ])
     }
   }
@@ -382,6 +387,10 @@ extension StorageManager {
     case .openAICompatible:
       return
         "You successfully installed Dayflow with your OpenAI-compatible provider. Come back in 30 minutes to see your first real activity card! ✨ (This is a sample card, so you can see what your timeline will look like.)"
+
+    case .minimax:
+      return
+        "You successfully installed Dayflow with MiniMax M3. Come back in 30 minutes to see your first real activity card! ✨ (This is a sample card, so you can see what your timeline will look like.)"
 
     case nil:
       return
@@ -422,7 +431,7 @@ extension StorageManager {
             distractions: meta.distractions,
             videoSummaryURL: row["video_summary_url"],
             otherVideoSummaryURLs: nil,
-            appSites: meta.appSites,
+appSites: meta.appSites,
             isBackupGenerated: meta.isBackupGenerated,
             providerId: meta.providerId,
             modelId: meta.modelId
@@ -468,6 +477,59 @@ extension StorageManager {
           )
         }
       }) ?? []
+  }
+
+  /// Fetches every non-deleted timeline card from the local DB. Used by the
+  /// provider-stats dashboard so we can compute usage aggregates entirely
+  /// offline (no network, no screenshot content).
+  func fetchAllTimelineCards() -> [TimelineCard] {
+    let decoder = JSONDecoder()
+    let cards = try? timedRead("fetchAllTimelineCards") { db in
+      try Row.fetchAll(
+        db,
+        sql: """
+              SELECT * FROM timeline_cards
+              WHERE is_deleted = 0
+              ORDER BY start_ts ASC
+          """
+      )
+      .map { row in
+        var distractions: [Distraction]? = nil
+        var appSites: AppSites? = nil
+        var isBackupGenerated: Bool? = nil
+        if let metadataString: String = row["metadata"],
+          let jsonData = metadataString.data(using: .utf8)
+        {
+          if let meta = try? decoder.decode(TimelineMetadata.self, from: jsonData) {
+            distractions = meta.distractions
+            appSites = meta.appSites
+            isBackupGenerated = meta.isBackupGenerated
+          } else if let legacy = try? decoder.decode([Distraction].self, from: jsonData) {
+            distractions = legacy
+          }
+        }
+        return TimelineCard(
+          recordId: row["id"],
+          batchId: row["batch_id"],
+          startTimestamp: row["start"] ?? "",
+          endTimestamp: row["end"] ?? "",
+          category: row["category"],
+          subcategory: row["subcategory"],
+          title: row["title"],
+          summary: row["summary"],
+          detailedSummary: row["detailed_summary"],
+          day: row["day"],
+          distractions: distractions,
+          videoSummaryURL: row["video_summary_url"],
+          otherVideoSummaryURLs: nil,
+          appSites: appSites,
+          isBackupGenerated: isBackupGenerated,
+          providerId: row["provider_id"],
+          modelId: row["model_id"]
+        )
+      }
+    }
+    return cards ?? []
   }
 
   func fetchTimelineCards(forDay day: String) -> [TimelineCard] {
@@ -528,7 +590,7 @@ extension StorageManager {
           distractions: meta.distractions,
           videoSummaryURL: row["video_summary_url"],
           otherVideoSummaryURLs: nil,
-          appSites: meta.appSites,
+appSites: meta.appSites,
           isBackupGenerated: meta.isBackupGenerated,
           providerId: meta.providerId,
           modelId: meta.modelId
@@ -580,7 +642,7 @@ extension StorageManager {
           distractions: meta.distractions,
           videoSummaryURL: row["video_summary_url"],
           otherVideoSummaryURLs: nil,
-          appSites: meta.appSites,
+appSites: meta.appSites,
           isBackupGenerated: meta.isBackupGenerated,
           providerId: meta.providerId,
           modelId: meta.modelId
@@ -1019,13 +1081,15 @@ extension StorageManager {
           sql: """
                 INSERT INTO timeline_cards(
                     batch_id, start, end, start_ts, end_ts, day, title,
-                    summary, category, subcategory, detailed_summary, metadata
+                    summary, category, subcategory, detailed_summary, metadata,
+                    provider_id, model_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
           arguments: [
             batchId, card.startTimestamp, card.endTimestamp, startTs, endTs, dayString, card.title,
             card.summary, card.category, card.subcategory, card.detailedSummary, metadataString,
+            card.providerId, card.modelId,
           ])
 
         // Capture the ID of the inserted card
