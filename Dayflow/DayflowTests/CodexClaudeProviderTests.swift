@@ -14,16 +14,19 @@ final class CodexClaudeProviderTests: XCTestCase {
       sessionId: nil
     )
 
+    // `--effort` was retired in 2.1.22. The streaming path now sets the effort via
+    // `--settings '{"effortLevel":"medium"}'` — the cmdline order is fixed by the runner
+    // (`--model` then `--settings`), so we assert the values instead of the full prefix.
+    XCTAssertEqual(try argument(after: "--model", in: parts), "sonnet")
     XCTAssertEqual(
-      Array(parts.prefix(10)),
-      [
-        "claude", "-p", "--output-format", "stream-json", "--verbose",
-        "--include-partial-messages", "--model", "sonnet", "--effort", "medium",
-      ]
+      try argument(after: "--settings", in: parts),
+      LoginShellRunner.shellEscape(#"{"effortLevel":"medium"}"#)
     )
+    XCTAssertTrue(parts.contains("--include-partial-messages"))
+    XCTAssertFalse(parts.contains("--effort"))
   }
 
-  func testClaudeStreamingResumeKeepsExplicitEffort() {
+  func testClaudeStreamingResumeKeepsExplicitEffort() throws {
     let parts = runner.buildClaudeStreamingCommandParts(
       prompt: "Fix the cards",
       model: "sonnet",
@@ -31,14 +34,14 @@ final class CodexClaudeProviderTests: XCTestCase {
       sessionId: "session-123"
     )
 
+    XCTAssertEqual(try argument(after: "--resume", in: parts), "session-123")
+    XCTAssertEqual(try argument(after: "--model", in: parts), "sonnet")
     XCTAssertEqual(
-      Array(parts.prefix(12)),
-      [
-        "claude", "-p", "--output-format", "stream-json", "--verbose",
-        "--include-partial-messages", "--resume", "session-123", "--model", "sonnet",
-        "--effort", "medium",
-      ]
+      try argument(after: "--settings", in: parts),
+      LoginShellRunner.shellEscape(#"{"effortLevel":"medium"}"#)
     )
+    XCTAssertTrue(parts.contains("--include-partial-messages"))
+    XCTAssertFalse(parts.contains("--effort"))
   }
 
   func testClaudeActivityCardsUseSonnetAliasAtLowEffort() {
@@ -339,6 +342,41 @@ final class CodexClaudeProviderTests: XCTestCase {
     XCTAssertFalse(sanitized?.detail?.contains("Private customer work") ?? true)
   }
 
+  func testClaudeOptimizedProfilesUseNormalAuthSafeMode() {
+    // The old wrapperMode field was a Dayflow-side enum that mapped to the `--safe-mode`
+    // flag unconditionally — but 2.1.22 (the user's current Claude Code) rejects the flag,
+    // so the runner now gates it on the installed version. Every optimized profile must
+    // agree with `ClaudeCapabilityProbe` on whether the flag ships: if the probe says
+    // "safe mode is supported", the profile includes the flag; if it says "skip", the
+    // profile omits it. The probe picks once at process start, so the two views stay in
+    // lockstep.
+    let expected = ClaudeCapabilityProbe.safeModeArguments.contains("--safe-mode")
+
+    for profile in [
+      ClaudeProvider.optimizedTranscriptionCLIProfile(),
+      ClaudeProvider.optimizedCardGenerationCLIProfile(),
+      ClaudeProvider.optimizedTranscriptionCorrectionCLIProfile(),
+    ] {
+      let parts = runner.buildClaudeCommandParts(
+        prompt: "test",
+        imagePaths: [],
+        model: "sonnet",
+        reasoningEffort: "low",
+        disableTools: false,
+        profile: profile
+      )
+      XCTAssertEqual(
+        parts.contains("--safe-mode"),
+        expected,
+        "Profile \(profile) disagreed with ClaudeCapabilityProbe on --safe-mode"
+      )
+      // The tool-restriction flags the safe mode flag was meant to additively reinforce
+      // are still in place, regardless of Claude Code version.
+      XCTAssertTrue(parts.contains("--disable-slash-commands"))
+    }
+>>>>>>> 6db4736 (fix(chat-cli): version-aware Claude CLI flag handling)
+  }
+
   func testClaudeSessionCleanupRemovesOnlyItsSessionTranscript() throws {
     let fileManager = FileManager.default
     let fixture = fileManager.temporaryDirectory
@@ -363,6 +401,14 @@ final class CodexClaudeProviderTests: XCTestCase {
     XCTAssertFalse(fileManager.fileExists(atPath: sessionTranscript.path))
     XCTAssertTrue(fileManager.fileExists(atPath: unrelatedTranscript.path))
   }
+
+  private func argument(after flag: String, in parts: [String]) throws -> String {
+    let index = try XCTUnwrap(parts.firstIndex(of: flag))
+    let valueIndex = parts.index(after: index)
+    XCTAssertLessThan(valueIndex, parts.endIndex)
+    return parts[valueIndex]
+  }
+
 
   private func card(
     start: String,
