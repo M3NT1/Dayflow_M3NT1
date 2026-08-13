@@ -966,6 +966,10 @@ final class LLMService: LLMServicing {
         let isBackupGenerated = usedProviderBackup || usedGemmaForCardGeneration
         // Note: card generation log is not persisted per-batch yet
 
+        // Surface which provider/model produced this batch of cards
+        let activeProviderId = activeContext.id.rawValue
+        let activeModelId = providerModelId(for: activeContext.id)
+
         // Replace old cards with new ones in the time range
         let replacementStartTime = Self.cardReplacementStartTime(
           activeProviderID: activeContext.id,
