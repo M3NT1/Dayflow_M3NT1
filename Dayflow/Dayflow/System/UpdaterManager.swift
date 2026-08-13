@@ -5,6 +5,7 @@
 //  Thin wrapper around Sparkle to expose simple update actions/state to SwiftUI.
 //
 
+import AppKit
 import Foundation
 import OSLog
 import Sparkle
@@ -36,7 +37,22 @@ final class UpdaterManager: NSObject, ObservableObject {
   @Published var updateAvailable = false
   @Published var latestVersionString: String? = nil
 
+  // Mirrors of SPUUpdater properties. Read from Sparkle via KVO in setupObservers(),
+  // written back through the explicit setters below (which are the only path the
+  // Settings UI uses — so we never overwrite the user's saved preference at launch).
+  @Published private(set) var automaticallyChecksForUpdates: Bool = false
+  @Published private(set) var automaticallyDownloadsUpdates: Bool = false
+
+  // Read-only view of SPUUpdater.canCheckForUpdates — the "Check now" button
+  // binds to this to dim itself while Sparkle is mid-check.
+  @Published private(set) var canCheckForUpdates: Bool = false
+
+  // Captured from SUAppcastItem.releaseNotesURL in didFindValidUpdate, kept around
+  // so the "View changelog" link in Settings stays valid until the next check.
+  @Published var pendingReleaseNotesURL: URL? = nil
+
   private let logger = Logger(subsystem: "com.dayflow.app", category: "sparkle")
+  private var observations: [NSKeyValueObservation] = []
 
   private override init() {
     super.init()
@@ -60,6 +76,39 @@ final class UpdaterManager: NSObject, ObservableObject {
     } catch {
       print("[Sparkle] updater.start() FAILED: \(error)")
     }
+
+    // KVO mirrors of SPUUpdater settings. Sparkle persists these to NSUserDefaults,
+    // so .initial pulls the user's saved preference from the previous session.
+    setupObservers()
+  }
+
+  private func setupObservers() {
+    observations = [
+      updater.observe(\.automaticallyChecksForUpdates, options: [.initial, .new]) {
+        [weak self] _, change in
+        let newValue = change.newValue ?? false
+        Task { @MainActor in
+          guard let self = self else { return }
+          self.automaticallyChecksForUpdates = newValue
+          // Keep SilentUserDriver in lockstep so the very next update check
+          // uses the user's preference, even if Sparkle changes the value
+          // internally (e.g. the 2nd-launch permission prompt).
+          self.userDriver.automaticallyChecksForUpdates = newValue
+        }
+      },
+      updater.observe(\.automaticallyDownloadsUpdates, options: [.initial, .new]) {
+        [weak self] _, change in
+        Task { @MainActor in
+          self?.automaticallyDownloadsUpdates = change.newValue ?? false
+        }
+      },
+      updater.observe(\.canCheckForUpdates, options: [.initial, .new]) {
+        [weak self] _, change in
+        Task { @MainActor in
+          self?.canCheckForUpdates = change.newValue ?? false
+        }
+      },
+    ]
   }
 
   func checkForUpdates(showUI: Bool = false) {
@@ -78,6 +127,43 @@ final class UpdaterManager: NSObject, ObservableObject {
       // Trigger a background check immediately; the scheduler will also keep running
       updater.checkForUpdatesInBackground()
     }
+  }
+
+  // MARK: - User-facing update preferences
+  //
+  // These setters are the only path the Settings UI uses to change Sparkle
+  // settings. Writing through SPUUpdater (rather than the @Published mirrors)
+  // is what makes the change persist to NSUserDefaults, and is what the
+  // Sparkle docs require: "Only set this property if the user wants to
+  // change the default via a user settings option."
+
+  func setAutomaticallyChecksForUpdates(_ newValue: Bool) {
+    guard newValue != updater.automaticallyChecksForUpdates else { return }
+    updater.automaticallyChecksForUpdates = newValue
+    track(
+      "sparkle_setting_changed",
+      [
+        "setting": "automaticallyChecksForUpdates",
+        "value": newValue,
+      ])
+  }
+
+  func setAutomaticallyDownloadsUpdates(_ newValue: Bool) {
+    guard newValue != updater.automaticallyDownloadsUpdates else { return }
+    updater.automaticallyDownloadsUpdates = newValue
+    track(
+      "sparkle_setting_changed",
+      [
+        "setting": "automaticallyDownloadsUpdates",
+        "value": newValue,
+      ])
+  }
+
+  /// Opens the release-notes URL captured from the most recent update check.
+  /// No-op if no update has been found yet, or if the feed didn't include notes.
+  func openReleaseNotes() {
+    guard let url = pendingReleaseNotesURL else { return }
+    NSWorkspace.shared.open(url)
   }
 }
 
@@ -216,6 +302,7 @@ extension UpdaterManager: SPUUpdaterDelegate {
       self.latestVersionString = item.displayVersionString
       self.statusText = "Update available: v\(self.latestVersionString ?? "?")"
       self.isChecking = false
+      self.pendingReleaseNotesURL = item.releaseNotesURL
       AppDelegate.allowTermination = false
       print("[Sparkle] Valid update found: \(item.versionString)")
       self.track("sparkle_update_found", self.props(for: item))
@@ -225,6 +312,7 @@ extension UpdaterManager: SPUUpdaterDelegate {
   nonisolated func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
     Task { @MainActor in
       self.updateAvailable = false
+      self.pendingReleaseNotesURL = nil
       self.statusText = "Latest version"
       self.isChecking = false
       AppDelegate.allowTermination = false
@@ -263,6 +351,7 @@ extension UpdaterManager: SPUUpdaterDelegate {
 
       if isNoUpdateError {
         self.updateAvailable = false
+        self.pendingReleaseNotesURL = nil
         self.statusText = "Latest version"
         AppDelegate.allowTermination = false
         return
