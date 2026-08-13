@@ -49,7 +49,7 @@ final class UpdaterManager: NSObject, ObservableObject {
 
   // Captured from SUAppcastItem.releaseNotesURL in didFindValidUpdate, kept around
   // so the "View changelog" link in Settings stays valid until the next check.
-  @Published var pendingReleaseNotesURL: URL? = nil
+  @Published private(set) var pendingReleaseNotesURL: URL? = nil
 
   private let logger = Logger(subsystem: "com.dayflow.app", category: "sparkle")
   private var observations: [NSKeyValueObservation] = []
@@ -68,6 +68,9 @@ final class UpdaterManager: NSObject, ObservableObject {
 
     do {
       try updater.start()
+      // Sync the driver flag synchronously so there's no race window where the
+      // driver's default (true) is active before the KVO .initial fires.
+      userDriver.allowsSilentInstall = updater.automaticallyDownloadsUpdates
       print("[Sparkle] updater.start() OK")
       print("[Sparkle] feedURL=\(updater.feedURL?.absoluteString ?? "nil")")
       print("[Sparkle] autoChecks=\(updater.automaticallyChecksForUpdates)")
@@ -90,16 +93,17 @@ final class UpdaterManager: NSObject, ObservableObject {
         Task { @MainActor in
           guard let self = self else { return }
           self.automaticallyChecksForUpdates = newValue
-          // Keep SilentUserDriver in lockstep so the very next update check
-          // uses the user's preference, even if Sparkle changes the value
-          // internally (e.g. the 2nd-launch permission prompt).
-          self.userDriver.automaticallyChecksForUpdates = newValue
         }
       },
       updater.observe(\.automaticallyDownloadsUpdates, options: [.initial, .new]) {
         [weak self] _, change in
+        let newValue = change.newValue ?? false
         Task { @MainActor in
-          self?.automaticallyDownloadsUpdates = change.newValue ?? false
+          guard let self = self else { return }
+          self.automaticallyDownloadsUpdates = newValue
+          // Keep SilentUserDriver in lockstep so silent install is gated on the
+          // download/install preference, not the check preference.
+          self.userDriver.allowsSilentInstall = newValue
         }
       },
       updater.observe(\.canCheckForUpdates, options: [.initial, .new]) {
@@ -162,7 +166,10 @@ final class UpdaterManager: NSObject, ObservableObject {
   /// Opens the release-notes URL captured from the most recent update check.
   /// No-op if no update has been found yet, or if the feed didn't include notes.
   func openReleaseNotes() {
-    guard let url = pendingReleaseNotesURL else { return }
+    guard let url = pendingReleaseNotesURL,
+      let scheme = url.scheme?.lowercased(),
+      scheme == "http" || scheme == "https"
+    else { return }
     NSWorkspace.shared.open(url)
   }
 }
@@ -288,6 +295,9 @@ extension UpdaterManager: SPUUpdaterDelegate {
     print("[Sparkle] finished cycle: \(updateCheck) error=\(String(describing: error))")
     logger.debug("Sparkle cycle finished error=\(String(describing: error))")
     Task { @MainActor in
+      // Reset the spinner even when the cycle ends without a
+      // didFindValidUpdate/updaterDidNotFindUpdate callback (e.g. user cancels).
+      self.isChecking = false
       self.track(
         "sparkle_cycle_finished",
         [
